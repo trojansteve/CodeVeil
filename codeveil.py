@@ -76,6 +76,20 @@ def base64_encode_strings(content):
         return f"[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded_string}'))"
     return re.sub(r'".*?"', replace_string, content)
 
+# Function to obfuscate Base64 encoded strings
+def obfuscate_base64_constructs(content):
+    def replace_base64(match):
+        encoded_string = match.group().strip('"')
+        # Split the Base64 string into chunks
+        chunks = [encoded_string[i:i+4] for i in range(0, len(encoded_string), 4)]
+        # Shuffle the chunks to obfuscate
+        random.shuffle(chunks)
+        # Create a PowerShell array to join the chunks at runtime
+        ps_array = ','.join(f'"{chunk}"' for chunk in chunks)
+        # PowerShell command to concatenate the chunks and decode the Base64 string at runtime
+        return f"(-join @({ps_array})).TrimEnd('=') | ForEach-Object {{ [System.Convert]::FromBase64String($_) }}"
+    return re.sub(r'"[A-Za-z0-9+/=]{4,}"', replace_base64, content)
+
 # Function to obfuscate cmdlets and function calls
 def obfuscate_cmdlets(content):
     cmdlets = ['Write-Host', 'Invoke-Expression', 'Get-Item', 'Set-Item']
@@ -161,6 +175,7 @@ def main(input_file, output_file):
         content = insert_backticks(content, ['function', 'param', 'begin', 'process', 'end'])
         content = randomize_case(content)
         content = base64_encode_strings(content)
+        content = obfuscate_base64_constructs(content)
         content = obfuscate_cmdlets(content)
         content = base64_encode_script_blocks(content)
         content = obfuscate_tokens(content)
