@@ -21,6 +21,7 @@ import ipaddress
 from datetime import datetime
 import base64
 import zlib
+import binascii
 
 # Function to generate a random string
 def random_string(length=10):
@@ -69,12 +70,34 @@ def obfuscate_variables(content):
         content = content.replace(var, obf_var)
     return content
 
+# Function to obfuscate cmdlets and function calls
+def obfuscate_cmdlets(content):
+    cmdlets = ['Write-Host', 'Invoke-Expression', 'Get-Item', 'Set-Item']
+    for cmdlet in cmdlets:
+        obfuscated_cmdlet = ''.join(random.choice([c.upper(), c.lower()]) for c in cmdlet)
+        content = re.sub(r'\b' + cmdlet + r'\b', obfuscated_cmdlet, content, flags=re.IGNORECASE)
+    return content
+
 # Function to Base64 encode string literals in the PowerShell script
 def base64_encode_strings(content):
     def replace_string(match):
         encoded_string = base64.b64encode(match.group().encode()).decode()
         return f"[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded_string}'))"
     return re.sub(r'".*?"', replace_string, content)
+
+# Function to Base64 encode entire script blocks or functions
+def base64_encode_script_blocks(content):
+    def encode_block(match):
+        encoded_block = base64.b64encode(match.group().encode()).decode()
+        return f"`$ExecutionContext.InvokeCommand.ExpandString([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded_block}')))"
+    return re.sub(r'(?s)(function\s+.*?\{.*?\})', encode_block, content)
+
+# Function to compress the script and decompress it at runtime
+def compress_script(content):
+    compressed_data = zlib.compress(content.encode())
+    encoded_compressed_data = base64.b64encode(compressed_data).decode()
+    decompression_script = f"$compressed = '{encoded_compressed_data}'; $decompressed = [System.Text.Encoding]::UTF8.GetString([System.IO.Compression.GZipStream]::new([System.IO.MemoryStream][System.Convert]::FromBase64String($compressed), [System.IO.Compression.CompressionMode]::Decompress)); Invoke-Expression $decompressed"
+    return decompression_script
 
 # Function to obfuscate Base64 encoded strings
 def obfuscate_base64_constructs(content):
@@ -90,20 +113,37 @@ def obfuscate_base64_constructs(content):
         return f"(-join @({ps_array})).TrimEnd('=') | ForEach-Object {{ [System.Convert]::FromBase64String($_) }}"
     return re.sub(r'"[A-Za-z0-9+/=]{4,}"', replace_base64, content)
 
-# Function to obfuscate cmdlets and function calls
-def obfuscate_cmdlets(content):
-    cmdlets = ['Write-Host', 'Invoke-Expression', 'Get-Item', 'Set-Item']
-    for cmdlet in cmdlets:
-        obfuscated_cmdlet = ''.join(random.choice([c.upper(), c.lower()]) for c in cmdlet)
-        content = re.sub(r'\b' + cmdlet + r'\b', obfuscated_cmdlet, content, flags=re.IGNORECASE)
-    return content
+# Function to obfuscate Base64 encoded strings by converting them to a byte array
+def obfuscate_base64_identifiers(content):
+    def replace_base64(match):
+        # Decode the Base64 string to bytes
+        b64_bytes = base64.b64decode(match.group().strip('"'))
+        # Convert bytes to a list of byte values
+        byte_values = [str(b) for b in b64_bytes]
+        # Create a PowerShell command to convert from byte values to a string at runtime
+        ps_command = f"[System.Text.Encoding]::UTF8.GetString([byte[]]({','.join(byte_values)}))"
+        return ps_command
+    return re.sub(r'"[A-Za-z0-9+/=]{4,}"', replace_base64, content)
 
-# Function to Base64 encode entire script blocks or functions
-def base64_encode_script_blocks(content):
-    def encode_block(match):
-        encoded_block = base64.b64encode(match.group().encode()).decode()
-        return f"`$ExecutionContext.InvokeCommand.ExpandString([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded_block}')))"
-    return re.sub(r'(?s)(function\s+.*?\{.*?\})', encode_block, content)
+# Function to obfuscate the 'FromBase64String' method call in PowerShell
+def obfuscate_from_base64_string(content):
+    # Generate a random function name to replace 'FromBase64String'
+    random_func_name = random_string()
+
+    # Define the custom function that decodes a Base64 string
+    custom_decoder_func = f"""
+function {random_func_name}([string]$value) {{
+    $data = [System.Convert]::FromBase64String($value)
+    return [System.Text.Encoding]::UTF8.GetString($data)
+}}
+"""
+
+    # Replace the 'FromBase64String' method call with the custom function call
+    content = re.sub(r'\[System\.Convert\]::FromBase64String\((.*?)\)', f'{random_func_name}($1)', content)
+
+    # Prepend the custom function definition to the script content
+    content = custom_decoder_func + content
+    return content
 
 # Function to obfuscate individual tokens like operators and punctuation
 def obfuscate_tokens(content):
@@ -115,13 +155,6 @@ def obfuscate_tokens(content):
 # Function to add extra whitespaces and newlines
 def manipulate_whitespace(content):
     return content.replace('\n', '\n' + ' ' * random.randint(1, 5))
-
-# Function to compress the script and decompress it at runtime
-def compress_script(content):
-    compressed_data = zlib.compress(content.encode())
-    encoded_compressed_data = base64.b64encode(compressed_data).decode()
-    decompression_script = f"$compressed = '{encoded_compressed_data}'; $decompressed = [System.Text.Encoding]::UTF8.GetString([System.IO.Compression.GZipStream]::new([System.IO.MemoryStream][System.Convert]::FromBase64String($compressed), [System.IO.Compression.CompressionMode]::Decompress)); Invoke-Expression $decompressed"
-    return decompression_script
 
 # Function to generate dynamic variable names at runtime
 def dynamic_variable_names(content):
@@ -176,8 +209,10 @@ def main(input_file, output_file):
         content = randomize_case(content)
         content = base64_encode_strings(content)
         content = obfuscate_base64_constructs(content)
-        content = obfuscate_cmdlets(content)
         content = base64_encode_script_blocks(content)
+        content = obfuscate_base64_identifiers(content)
+        content = obfuscate_from_base64_string(content)
+        content = obfuscate_cmdlets(content)
         content = obfuscate_tokens(content)
         content = manipulate_whitespace(content)
         content = compress_script(content)
