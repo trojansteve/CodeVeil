@@ -14,19 +14,25 @@
 
 
 import argparse
+import os
 import random
 import string
 import re
 import ipaddress
+import stat
+import tempfile
 from datetime import datetime
 import base64
 import zlib
 import binascii
 
+MAX_INPUT_SIZE = 10 * 1024 * 1024
+_RANDOM = random.SystemRandom()
+
 # Function to generate a random string
 def random_string(length=10):
     letters = string.ascii_lowercase
-    return ''.join(random.choice(letters) for i in range(length))
+    return ''.join(_RANDOM.choice(letters) for _ in range(length))
 
 # Function to obfuscate comments in the PowerShell script
 def obfuscate_comments(content):
@@ -60,7 +66,7 @@ def insert_backticks(content, keywords):
 
 # Function to randomize the case of characters in the PowerShell script
 def randomize_case(content):
-    return ''.join(random.choice([c.upper(), c.lower()]) for c in content)
+    return ''.join(_RANDOM.choice([c.upper(), c.lower()]) for c in content)
 
 # Function to obfuscate variable names in the PowerShell script
 def obfuscate_variables(content):
@@ -74,7 +80,7 @@ def obfuscate_variables(content):
 def obfuscate_cmdlets(content):
     cmdlets = ['Write-Host', 'Invoke-Expression', 'Get-Item', 'Set-Item']
     for cmdlet in cmdlets:
-        obfuscated_cmdlet = ''.join(random.choice([c.upper(), c.lower()]) for c in cmdlet)
+        obfuscated_cmdlet = ''.join(_RANDOM.choice([c.upper(), c.lower()]) for c in cmdlet)
         content = re.sub(r'\b' + cmdlet + r'\b', obfuscated_cmdlet, content, flags=re.IGNORECASE)
     return content
 
@@ -106,7 +112,7 @@ def obfuscate_base64_constructs(content):
         # Split the Base64 string into chunks
         chunks = [encoded_string[i:i+4] for i in range(0, len(encoded_string), 4)]
         # Shuffle the chunks to obfuscate
-        random.shuffle(chunks)
+        _RANDOM.shuffle(chunks)
         # Create a PowerShell array to join the chunks at runtime
         ps_array = ','.join(f'"{chunk}"' for chunk in chunks)
         # PowerShell command to concatenate the chunks and decode the Base64 string at runtime
@@ -154,7 +160,7 @@ def obfuscate_tokens(content):
 
 # Function to add extra whitespaces and newlines
 def manipulate_whitespace(content):
-    return content.replace('\n', '\n' + ' ' * random.randint(1, 5))
+    return content.replace('\n', '\n' + ' ' * _RANDOM.randint(1, 5))
 
 # Function to generate dynamic variable names at runtime
 def dynamic_variable_names(content):
@@ -193,13 +199,51 @@ def insert_special_characters(content):
     return re.sub(r'".+?"', replace_string, content)
 
 
+def read_input_file(input_file):
+    """Read a bounded, regular UTF-8 file without a path-check race."""
+    with open(input_file, 'rb') as file:
+        file_stat = os.fstat(file.fileno())
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ValueError("input must be a regular file")
+        if file_stat.st_size > MAX_INPUT_SIZE:
+            raise ValueError(f"input exceeds the {MAX_INPUT_SIZE}-byte limit")
+        data = file.read(MAX_INPUT_SIZE + 1)
+    if len(data) > MAX_INPUT_SIZE:
+        raise ValueError(f"input exceeds the {MAX_INPUT_SIZE}-byte limit")
+    return data.decode('utf-8')
+
+
+def write_output_file(output_file, content):
+    """Atomically replace an output path rather than following an output symlink."""
+    output_path = os.path.abspath(output_file)
+    output_dir = os.path.dirname(output_path)
+    fd, temporary_path = tempfile.mkstemp(prefix='.codeveil-', dir=output_dir)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='') as file:
+            fd = -1
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary_path, output_path)
+    except Exception:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 # Main function to handle the obfuscation process
 def main(input_file, output_file):
-    try:
-        # Read the input PowerShell script
-        with open(input_file, 'r') as file:
-            content = file.read()
+    if os.path.abspath(input_file) == os.path.abspath(output_file):
+        raise ValueError("input and output paths must be different")
 
+    content = read_input_file(input_file)
+
+    try:
         # Perform obfuscation techniques
         content = obfuscate_comments(content)
         content = obfuscate_variables(content)
@@ -220,25 +264,27 @@ def main(input_file, output_file):
         content = rename_functions_and_parameters(content)
         content = insert_special_characters(content)
 
-        # Write the obfuscated script to the output file
-        with open(output_file, 'w') as file:
-            file.write(content)
+        write_output_file(output_file, content)
 
         print(f"Obfuscated script written to {output_file}")
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    except (OSError, ValueError, UnicodeError, binascii.Error) as error:
+        raise RuntimeError(f"obfuscation failed: {error}") from error
 
-# Parse command-line arguments
-parser = argparse.ArgumentParser(description='PowerShell script obfuscator for vulnerability research.')
-parser.add_argument('-f', '--file', type=str, required=True, help='PowerShell file to obfuscate')
-parser.add_argument('-o', '--output', type=str, help='Output file for the obfuscated script')
-args = parser.parse_args()
 
-# Generate a timestamped output filename if not provided
-if not args.output:
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    args.output = f"{args.file}-obfuscated-{timestamp}.ps1"
+def cli():
+    parser = argparse.ArgumentParser(description='PowerShell script obfuscator for vulnerability research.')
+    parser.add_argument('-f', '--file', type=str, required=True, help='PowerShell file to obfuscate')
+    parser.add_argument('-o', '--output', type=str, help='Output file for the obfuscated script')
+    args = parser.parse_args()
+
+    if not args.output:
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        args.output = f"{args.file}-obfuscated-{timestamp}.ps1"
+    try:
+        main(args.file, args.output)
+    except (OSError, ValueError, RuntimeError) as error:
+        parser.exit(1, f"error: {error}\n")
 
 # Run the main function with the provided arguments
 if __name__ == '__main__':
-    main(args.file, args.output)
+    cli()
